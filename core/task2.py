@@ -5,10 +5,21 @@ from multiprocessing import Pool
 import pandas as pd
 # from .utils import memory_info
 
-def process_reverts(reverts_paths: list[Path]) -> pd.DataFrame:
+
+def process_pharmacies(input_pharmacies_dir: Path) -> pd.DataFrame:
+
+    pharmacies = pd.concat(
+        pd.read_csv(csv_path, dtype={"chain": "object", "npi": "object"})
+        for csv_path in input_pharmacies_dir.iterdir()
+    ).drop_duplicates(["npi"])[["npi"]]
+
+    return pharmacies
+
+
+def process_reverts(input_reverts_dir: Path) -> pd.DataFrame:
 
     union_reverts = pd.concat(
-        [pd.read_json(json_path) for json_path in reverts_paths]
+        [pd.read_json(json_path) for json_path in list(input_reverts_dir.iterdir())]
     )
     union_reverts["reverted"] = 1
     union_reverts.set_index("claim_id", inplace=True)
@@ -16,7 +27,7 @@ def process_reverts(reverts_paths: list[Path]) -> pd.DataFrame:
     return union_reverts
 
 
-def process_claims(claims_json: Path, reverts: pd.DataFrame) -> pd.DataFrame:
+def process_claims(claims_json: Path, reverts: pd.DataFrame, pharmacies: pd.DataFrame) -> pd.DataFrame:
     # print(f"WORKER --> {memory_info()}, step='START', json='{claims_json}'")
     dtype = {
         "id": "object",
@@ -27,8 +38,11 @@ def process_claims(claims_json: Path, reverts: pd.DataFrame) -> pd.DataFrame:
         "quantity": "float64",
     }
     claims = pd.read_json(claims_json, dtype=dtype)
-    claims.set_index("id", inplace=True)
 
+    # Exclude NPI which is not from pharmacies list
+    claims = claims.merge(pharmacies, on="npi", how="inner")
+
+    # Exclude invalid rows
     invalid_claims = claims[
         (claims["quantity"].isna() | (claims["quantity"] < 0)) |
         (claims["price"].isna() | (claims["price"] < 0))
@@ -37,15 +51,17 @@ def process_claims(claims_json: Path, reverts: pd.DataFrame) -> pd.DataFrame:
         invalid_claims.to_json(f"./output/invalid_claims/{claims_json.name}", orient="records")
         claims = claims.drop(index=invalid_claims.index)
 
-    claims_enriched = pd.merge(claims, reverts, left_index=True, right_index=True, how='left')
+    # Enrich data from reverts
+    claims_enriched = pd.merge(claims, reverts, left_on="id", right_on="claim_id", how='left')
     claims_enriched["reverted"] = claims_enriched["reverted"].fillna(0)
+    claims_enriched.loc[claims_enriched["reverted"] == 1, ["quantity", "price"]] = None
 
     claims_agg = (
         claims_enriched
         .groupby(["npi", "ndc"])
         .agg(
             reverted=("reverted", "sum"),
-            fills=("quantity", "size"),
+            fills=("quantity", "count"),
             sum_qty=("quantity", "sum"),
             total_price=("price", "sum")
         ))
@@ -55,6 +71,7 @@ def process_claims(claims_json: Path, reverts: pd.DataFrame) -> pd.DataFrame:
 def calculate_metrics(
         input_claims_dir: Path,
         input_reverts_dir: Path,
+        input_pharmacies_dir: Path,
         workers: int,
         output_path: Path
 ) -> None:
@@ -70,21 +87,23 @@ def calculate_metrics(
     Args:
         input_claims_dir : Path to the directory containing claims data in JSON format.
         input_reverts_dir: Path to the directory containing reverts data.
+        input_pharmacies_dir: Path to the directory container (npi, chain) data.
         workers          : The number of worker processes to use for parallel processing of claims data.
         output_path      : Path where the resulting aggregated data will be saved in JSON format.
+
 
     Returns:
         The function saves the result to a JSON file and does not return any value.
     """
 
     # print(f"MAIN: {memory_info()}")
-    # pseudo shared events
-    shared_reverts: pd.DataFrame = process_reverts(list(input_reverts_dir.iterdir()))
+    reverts: pd.DataFrame = process_reverts(input_reverts_dir)
+    pharmacies: pd.DataFrame = process_pharmacies(input_pharmacies_dir)
 
     t1 = time.time()
     with Pool(workers) as pool:
         preprocessed_claims = pool.starmap(
-            process_claims, [(json_path, shared_reverts) for json_path in input_claims_dir.iterdir()]
+            process_claims, [(json_path, reverts, pharmacies) for json_path in input_claims_dir.iterdir()]
         )
         print(f"Task2: Initial preprocessing done in {round(time.time() - t1, 4)} sec")
 

@@ -23,6 +23,7 @@ if __name__ == "__main__":
     calculate_metrics(
         input_claims_dir=input_claims,
         input_reverts_dir=input_reverts,
+        input_pharmacies_dir=input_pharmacies,
         workers=num_cores,
         output_path=OUTPUT_TASK2
     )

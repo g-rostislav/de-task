@@ -32,10 +32,9 @@ def calculate_lowest_avg_prices(
 
     metrics = pd.read_json(metrics_json_path, dtype={"npi": "object", "ndc": "object"})
 
-    report = metrics.merge(pharmacies, on="npi", how='left')
-    report["name"] = report["name"].fillna("undefined")
+    report = metrics.merge(pharmacies, on="npi", how='inner')
 
-    result = (
+    report = (
         report
         .drop_duplicates(subset=['ndc', 'avg_price'])
         .groupby("ndc").apply(lambda x: x.nsmallest(top_n, 'avg_price'))
@@ -43,5 +42,5 @@ def calculate_lowest_avg_prices(
         .groupby("ndc").apply(lambda x: x[['name', 'avg_price']].to_dict(orient='records'))
         .reset_index()
     )
-    result.columns = ["ndc", "chain"]
-    result.to_json(output_path, orient="records", indent=1)
+    report.columns = ["ndc", "chain"]
+    report.to_json(output_path, orient="records", indent=1)
